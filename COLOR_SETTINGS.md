@@ -31,7 +31,7 @@
 |---|---:|---|---|
 | `-q`, `--quality` | `85` | `1-100` | Качество сжатия JPEG и WebP |
 | `-c`, `--colors` | `128` | `0-256` | Число цветов для палитры цветных изображений. `0` — только JPEG |
-| `--colors_quantize` | `"LIBIMAGEQUANT"` | `FASTOCTREE`, `FASTOCTREE`, `LIBIMAGEQUANT`, `MEDIANCUT` | Метод обработки цветных png без прозрачности |
+| `--colors_quantize` | `"LIBIMAGEQUANT"` | `FASTOCTREE`, `LIBIMAGEQUANT`, `MEDIANCUT` | Метод обработки цветных png без прозрачности |
 | `--tolerance` | `15` | `0-255` | Порог определения цветности |
 | `--sample-size` | `5000` | положительное число | Количество пикселей для проверки цветности |
 | `--mono-quantize` | `"LA"` | `LA`, `FASTOCTREE`, `LIBIMAGEQUANT`, `MEDIANCUT` | Метод обработки монохромных изображений с прозрачностью |
