@@ -147,7 +147,7 @@ def _save_png_la(img):
 
 def _compare_with_png(candidate_data, candidate_label, img, colors, has_alpha):
     """
-    Сравнивает candidate (JPEG/WebP) с PNG-N, возвращает меньший.
+    Сравнивает candidate (JPEG) с PNG-N, возвращает меньший.
     img должна быть в режиме RGB (непрозрачная) или RGBA (прозрачная).
     Если PNG-N построить не удалось (нет libimagequant и т.п.) —
     возвращает candidate без сравнения.
