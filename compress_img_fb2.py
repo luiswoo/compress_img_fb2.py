@@ -7,34 +7,44 @@ from PIL import Image
 from lxml import etree
 import random
 
-# ==================== НАСТРОЙКИ ОБРАБОТКИ ====================
-# quality: качество JPEG (1-100). Переопределяется флагом -q / --quality
-# colors: количество цветов для PNG авто-выбора (1-256).
-#         None — только JPEG, без авто-выбора.
-# mono_quantize: метод для монохромных изображений с прозрачностью.
-#                "LIBIMAGEQUANT" — лучшее качество, требует поддержки Pillow
-#                "FASTOCTREE" — всегда доступен, быстрый
-#                "MEDIANCUT" — только для непрозрачных (RGBA автоматически fallback)
-#                "LA" — grayscale+alpha PNG, без квантования, максимальное качество
-# mono_colors: сколько цветов оставлять при квантовании монохромных.
-# max_size: максимальный размер по длинной стороне (px)
-# min_size: минимальный размер по короткой стороне (px)
-# tolerance: порог определения цветности (разница RGB)
-# sample_size: сколько пикселей проверять для определения цветности
+# ==================== НАСТРОЙКИ ПО УМОЛЧАНИЮ ====================
+# Каждый параметр можно переопределить из командной строки (см. --help).
+# Подробное описание и примеры: COLOR_SETTINGS.md
+#
+# max_size:      максимальный размер по длинной стороне (px)
+# min_size:      минимальный размер по короткой стороне (px)
+# quality:       качество JPEG (1-100)
+# colors:        цветов для PNG авто-выбора (1-256). None — только JPEG
+# mono_quantize: метод для монохромных с прозрачностью
+#                "LA"            — grayscale+alpha без потерь, макс. качество
+#                "LIBIMAGEQUANT" — лучшее квантование (если доступно в Pillow)
+#                "FASTOCTREE"    — быстрый, всегда доступен
+#                "MEDIANCUT"     — только для непрозрачных
+# mono_colors:   цветов при квантовании монохромных (значимо только если
+#                mono_quantize != "LA")
+# tolerance:     порог определения цветности (разница R/G/B). Поднимите,
+#                если серая картинка определяется как цветная (шум JPEG)
+# sample_size:   сколько пикселей проверять для определения цветности
 CONFIG = {
     "max_size": 800,
     "min_size": 600,
-    "quality": 75,
-    "colors": 64,
-    "mono_quantize": "LIBIMAGEQUANT",
-    "mono_colors": 32,
-    "tolerance": 3,
+    "quality": 85,
+    "colors": 128,
+    "mono_quantize": "LA",
+    "mono_colors": 32,    # 32 - 32 оттенка серого (для чб)
+    "tolerance": 15,      # 3 - строго чб, 15 градаций серого для грязного чб конвертиронного и другого формата
     "sample_size": 5000,
 }
-# =============================================================
+# ================================================================
+
+MONO_QUANTIZE_CHOICES = ["LA", "LIBIMAGEQUANT", "FASTOCTREE", "MEDIANCUT"]
 
 # Проверяем доступность libimagequant в Pillow
 _HAS_LIBIMAGEQUANT = hasattr(Image.Quantize, 'LIBIMAGEQUANT')
+
+# Рабочая конфигурация: CONFIG + переопределения из командной строки
+CFG = dict(CONFIG)
+
 
 def _get_quantize_method(preferred, has_alpha=False):
     """
@@ -61,12 +71,13 @@ def _get_quantize_method(preferred, has_alpha=False):
     method = getattr(Image.Quantize, preferred, Image.Quantize.FASTOCTREE)
     return method, preferred
 
+
 def is_color_image(img, tolerance=None, sample_size=None):
     """Определяет, является ли изображение цветным или монохромным."""
     if tolerance is None:
-        tolerance = CONFIG["tolerance"]
+        tolerance = CFG["tolerance"]
     if sample_size is None:
-        sample_size = CONFIG["sample_size"]
+        sample_size = CFG["sample_size"]
 
     if img.mode in ('L', 'LA'):
         return False
@@ -94,11 +105,13 @@ def is_color_image(img, tolerance=None, sample_size=None):
 
     return False
 
+
 def _save_jpeg(img, quality):
     """Сохраняет изображение в JPEG с заданным качеством."""
     buf = BytesIO()
     img.save(buf, format='JPEG', quality=quality, optimize=True)
     return buf.getvalue(), "image/jpeg"
+
 
 def _save_png8(img, colors, method=Image.Quantize.FASTOCTREE):
     """Сохраняет изображение в PNG с палитрой (PNG-8)."""
@@ -107,6 +120,7 @@ def _save_png8(img, colors, method=Image.Quantize.FASTOCTREE):
     buf = BytesIO()
     img.save(buf, format='PNG', optimize=True)
     return buf.getvalue(), "image/png"
+
 
 def _save_png_la(img):
     """Сохраняет изображение как grayscale+alpha PNG (без квантования)."""
@@ -118,6 +132,7 @@ def _save_png_la(img):
     img.save(buf, format='PNG', optimize=True)
     return buf.getvalue(), "image/png"
 
+
 def compress_image(image_data, colors=None, quality=None):
     """
     Сжимает изображение: масштабирует, обрабатывает прозрачность,
@@ -126,10 +141,10 @@ def compress_image(image_data, colors=None, quality=None):
     Если colors указан (число) — генерирует JPEG и PNG-N, выбирает меньший.
     Если colors is None — только JPEG.
     """
-    max_size = CONFIG["max_size"]
-    min_size = CONFIG["min_size"]
+    max_size = CFG["max_size"]
+    min_size = CFG["min_size"]
     if quality is None:
-        quality = CONFIG["quality"]
+        quality = CFG["quality"]
 
     with Image.open(BytesIO(image_data)) as img:
         print(f"Исходный размер изображения: {img.size}")
@@ -173,8 +188,8 @@ def compress_image(image_data, colors=None, quality=None):
                 img = background
             else:
                 print("Изображение монохромное.")
-                mono_mode = CONFIG.get("mono_quantize", "FASTOCTREE")
-                mono_colors = CONFIG.get("mono_colors", 256)
+                mono_mode = CFG.get("mono_quantize", "FASTOCTREE")
+                mono_colors = CFG.get("mono_colors", 256)
 
                 if mono_mode == "LA":
                     print("Сохраняем как grayscale+alpha PNG (LA).")
@@ -209,6 +224,7 @@ def compress_image(image_data, colors=None, quality=None):
                 print(f"Выбран: JPEG q={quality} ({len(jpeg_data)/1024:.1f} КБ)")
 
         return jpeg_data, jpeg_type
+
 
 def process_fb2(file_path, output_path=None, colors=None, quality=None):
     """
@@ -331,6 +347,7 @@ def process_fb2(file_path, output_path=None, colors=None, quality=None):
         print(f"Ошибка сохранения: {e}")
         return False
 
+
 def process_directory(root_dir, colors=None, quality=None):
     """Рекурсивно обрабатывает все .fb2 в каталоге с ЗАМЕНОЙ оригинала."""
     success = 0
@@ -346,71 +363,156 @@ def process_directory(root_dir, colors=None, quality=None):
                     errors += 1
     print(f"\nСтатистика: успешно {success}, ошибок {errors}")
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
+
+EXAMPLES = """\
+примеры:
+  # Базовая обработка одного файла (результат — compress_<имя>.fb2)
+  python compress_img_fb2.py book.fb2
+
+  # Серые линии/градиенты определяются как цветные (шум JPEG) —
+  # поднимаем порог цветности:
+  python compress_img_fb2.py book.fb2 --tolerance 15
+
+  # Ч/б иллюстрации с градациями серого — максимальное качество:
+  python compress_img_fb2.py book.fb2 --mono-quantize LA
+
+  # ...или компактнее, с незаметным бандингом:
+  python compress_img_fb2.py book.fb2 --mono-quantize FASTOCTREE --mono-colors 128
+
+  # Цветные картинки: авто-выбор JPEG q85 vs PNG-128
+  python compress_img_fb2.py book.fb2 -c 128
+
+  # Только JPEG, качество 60:
+  python compress_img_fb2.py book.fb2 -q 60 -c 0
+
+  # Каталог целиком (оригиналы будут заменены!):
+  python compress_img_fb2.py ./library --tolerance 15 --mono-quantize LA
+
+  # Полный набор: размер, качество, все цветовые параметры
+  python compress_img_fb2.py book.fb2 --max-size 1024 --min-size 800 \
+      -q 80 -c 256 --tolerance 12 --mono-quantize FASTOCTREE --mono-colors 256
+
+замечания:
+  -c 0 отключает авто-выбор PNG (только JPEG) для цветных изображений.
+  --mono-colors имеет смысл только если --mono-quantize не LA.
+  Все параметры, не указанные в командной строке, берутся из CONFIG
+  в начале скрипта. Подробности: COLOR_SETTINGS.md
+"""
+
+
+def build_arg_parser():
+    p = argparse.ArgumentParser(
+        prog="compress_img_fb2.py",
         description="Сжатие и масштабирование изображений в FB2 файлах.",
-        usage="python compress_img_fb2.py <файл.fb2 или каталог> [опции]"
+        epilog=EXAMPLES,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("path", nargs="?", help="Путь до .fb2 файла или каталога")
-    parser.add_argument(
-        "-c", "--colors", type=int, default=None, metavar="N",
-        help="Количество цветов для PNG авто-выбора (1-256). Переопределяет CONFIG['colors']"
-    )
-    parser.add_argument(
-        "-q", "--quality", type=int, default=None, metavar="N",
-        help="Качество JPEG (1-100). Переопределяет CONFIG['quality']"
-    )
-    args = parser.parse_args()
+    p.add_argument("path", nargs="?", help="Путь до .fb2 файла или каталога")
+    p.add_argument("-q", "--quality", type=int, default=None, metavar="N",
+                   help="качество JPEG 1-100 (по умолчанию: %(default)s из CONFIG)")
+    p.add_argument("-c", "--colors", type=int, default=None, metavar="N",
+                   help="цветов для PNG авто-выбора 1-256, 0 = только JPEG (по умолчанию из CONFIG)")
+    p.add_argument("--mono-quantize", choices=MONO_QUANTIZE_CHOICES, default=None,
+                   metavar="M",
+                   help="метод для монохромных с прозрачностью: LA, LIBIMAGEQUANT, "
+                        "FASTOCTREE, MEDIANCUT (по умолчанию из CONFIG)")
+    p.add_argument("--mono-colors", type=int, default=None, metavar="N",
+                   help="цветов при квантовании монохромных 2-256, "
+                        "значимо только если --mono-quantize не LA (по умолчанию из CONFIG)")
+    p.add_argument("--max-size", type=int, default=None, metavar="N",
+                   help="максимум по длинной стороне, px (по умолчанию из CONFIG)")
+    p.add_argument("--min-size", type=int, default=None, metavar="N",
+                   help="минимум по короткой стороне, px (по умолчанию из CONFIG)")
+    p.add_argument("--tolerance", type=int, default=None, metavar="N",
+                   help="порог определения цветности: разница R/G/B в тонах 0-255. "
+                        "Поднимите (12-20), если серая картинка считается цветной (по умолчанию из CONFIG)")
+    p.add_argument("--sample-size", type=int, default=None, metavar="N",
+                   help="сколько пикселей проверять при определении цветности (по умолчанию из CONFIG)")
+    return p
+
+
+def apply_overrides(args):
+    """Накладывает значения из командной строки на CONFIG."""
+    if args.quality is not None:
+        if not (1 <= args.quality <= 100):
+            print("Ошибка: -q / --quality должен быть от 1 до 100"); sys.exit(1)
+        CFG["quality"] = args.quality
+    if args.colors is not None:
+        if args.colors == 0:
+            CFG["colors"] = None
+        elif 1 <= args.colors <= 256:
+            CFG["colors"] = args.colors
+        else:
+            print("Ошибка: -c / --colors должен быть от 1 до 256 (или 0 = выкл)"); sys.exit(1)
+    if args.mono_quantize is not None:
+        CFG["mono_quantize"] = args.mono_quantize
+    if args.mono_colors is not None:
+        if not (2 <= args.mono_colors <= 256):
+            print("Ошибка: --mono-colors должен быть от 2 до 256"); sys.exit(1)
+        CFG["mono_colors"] = args.mono_colors
+    if args.max_size is not None:
+        if args.max_size < 1:
+            print("Ошибка: --max-size должен быть >= 1"); sys.exit(1)
+        CFG["max_size"] = args.max_size
+    if args.min_size is not None:
+        if args.min_size < 1:
+            print("Ошибка: --min-size должен быть >= 1"); sys.exit(1)
+        CFG["min_size"] = args.min_size
+    if args.tolerance is not None:
+        if not (0 <= args.tolerance <= 255):
+            print("Ошибка: --tolerance должен быть от 0 до 255"); sys.exit(1)
+        CFG["tolerance"] = args.tolerance
+    if args.sample_size is not None:
+        if args.sample_size < 1:
+            print("Ошибка: --sample-size должен быть >= 1"); sys.exit(1)
+        CFG["sample_size"] = args.sample_size
+
+
+def print_effective_config():
+    print("Эффективные настройки:")
+    print(f"  max_size      = {CFG['max_size']} px")
+    print(f"  min_size      = {CFG['min_size']} px")
+    print(f"  quality       = {CFG['quality']} (JPEG)")
+    print(f"  colors        = {CFG['colors']} (PNG авто-выбор, None = только JPEG)")
+    print(f"  mono_quantize = {CFG['mono_quantize']}")
+    print(f"  mono_colors   = {CFG['mono_colors']} (значимо, если mono_quantize != LA)")
+    print(f"  tolerance     = {CFG['tolerance']} (порог цветности)")
+    print(f"  sample_size   = {CFG['sample_size']} пикселей")
+    print(f"  libimagequant = {'доступна' if _HAS_LIBIMAGEQUANT else 'НЕ найдена'}")
+
+
+if __name__ == "__main__":
+    args = build_arg_parser().parse_args()
 
     if not args.path:
-        print("Использование:")
-        print("  python compress_img_fb2.py <файл.fb2>              # создаст compress_файл.fb2")
-        print("  python compress_img_fb2.py <файл.fb2> -c 128       # PNG-128 авто-выбор")
-        print("  python compress_img_fb2.py <файл.fb2> -q 60          # JPEG quality 60")
-        print("  python compress_img_fb2.py <файл.fb2> -c 128 -q 60   # оба параметра")
-        print("  python compress_img_fb2.py <каталог>                 # рекурсивно заменит")
-        print("  python compress_img_fb2.py <каталог> -c 256            # рекурсивно с PNG-256")
-        print()
-        print("Настройки по умолчанию (CONFIG в начале скрипта):")
-        print(f"  quality       = {CONFIG['quality']}   (JPEG качество)")
-        print(f"  colors        = {CONFIG['colors']}    (PNG палитра, None = только JPEG)")
-        print(f"  mono_quantize = {CONFIG['mono_quantize']} (LIBIMAGEQUANT | FASTOCTREE | MEDIANCUT | LA)")
-        print(f"  mono_colors   = {CONFIG['mono_colors']}   (цветов для монохромных PNG)")
-        print(f"  libimagequant = {'доступна' if _HAS_LIBIMAGEQUANT else 'НЕ найдена'}")
-        print(f"  max_size      = {CONFIG['max_size']} px")
-        print(f"  min_size      = {CONFIG['min_size']} px")
+        build_arg_parser().print_help()
         sys.exit(1)
+
+    apply_overrides(args)
 
     path = args.path
-    colors = args.colors if args.colors is not None else CONFIG.get("colors")
-    quality = args.quality if args.quality is not None else CONFIG.get("quality")
-
-    if colors is not None and (colors < 1 or colors > 256):
-        print("Ошибка: -c / --colors должен быть от 1 до 256")
-        sys.exit(1)
-
-    if quality is not None and not (1 <= quality <= 100):
-        print("Ошибка: -q / --quality должен быть от 1 до 100")
-        sys.exit(1)
+    colors = CFG["colors"]
+    quality = CFG["quality"]
 
     if os.path.isfile(path) and path.lower().endswith(".fb2"):
         directory, filename = os.path.split(path)
-        new_filename = f"compress_{filename}"
-        output_path = os.path.join(directory, new_filename)
+        output_path = os.path.join(directory, f"compress_{filename}")
         print(f"Обработка одного файла: {path}")
         print(f"Результат будет сохранён в: {output_path}")
+        print_effective_config()
         mode = f"JPEG q={quality}"
         if colors is not None:
             mode += f" vs PNG-{colors} (авто-выбор)"
-        print(f"Режим: {mode}")
+        print(f"Режим (цветные): {mode}")
         process_fb2(path, output_path=output_path, colors=colors, quality=quality)
 
     elif os.path.isdir(path):
         print(f"Рекурсивная обработка каталога с заменой оригиналов: {path}")
+        print_effective_config()
         mode = f"JPEG q={quality}"
         if colors is not None:
             mode += f" vs PNG-{colors} (авто-выбор)"
-        print(f"Режим: {mode}")
+        print(f"Режим (цветные): {mode}")
         process_directory(path, colors=colors, quality=quality)
 
     else:
