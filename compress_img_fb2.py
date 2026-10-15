@@ -13,8 +13,8 @@ import random
 #
 # max_size:      максимальный размер по длинной стороне (px)
 # min_size:      минимальный размер по короткой стороне (px)
-# quality:       качество JPEG (1-100)
-# colors:        цветов для PNG авто-выбора (1-256). None — только JPEG
+# quality:       качество JPEG/WebP (1-100)
+# colors:        цветов для PNG авто-выбора (1-256). None — только JPEG/WebP
 # mono_quantize: метод для монохромных с прозрачностью
 #                "LA"            — grayscale+alpha без потерь, макс. качество
 #                "LIBIMAGEQUANT" — лучшее квантование (если доступно в Pillow)
@@ -25,6 +25,10 @@ import random
 # tolerance:     порог определения цветности (разница R/G/B). Поднимите,
 #                если серая картинка определяется как цветная (шум JPEG)
 # sample_size:   сколько пикселей проверять для определения цветности
+# webp:          если True — все изображения сохраняются в WebP (ключ --webp).
+#                WebP нативно поддерживает альфа-канал, поэтому прозрачность
+#                не заливается фоном и монохромные/цветные квантованию не
+#                подвергаются; нужны только размер и качество.
 CONFIG = {
     "max_size": 800,
     "min_size": 600,
@@ -34,6 +38,7 @@ CONFIG = {
     "mono_colors": 32,    # 32 - 32 оттенка серого (для чб)
     "tolerance": 15,      # 3 - строго чб, 15 градаций серого для грязного чб конвертиронного и другого формата
     "sample_size": 5000,
+    "webp": False,        # True только при запуске с --webp
 }
 # ================================================================
 
@@ -113,6 +118,13 @@ def _save_jpeg(img, quality):
     return buf.getvalue(), "image/jpeg"
 
 
+def _save_webp(img, quality):
+    """Сохраняет изображение в WebP с заданным качеством (альфа-канал сохраняется)."""
+    buf = BytesIO()
+    img.save(buf, format='WEBP', quality=quality, method=6)
+    return buf.getvalue(), "image/webp"
+
+
 def _save_png8(img, colors, method=Image.Quantize.FASTOCTREE):
     """Сохраняет изображение в PNG с палитрой (PNG-8)."""
     if img.mode != 'P':
@@ -133,18 +145,46 @@ def _save_png_la(img):
     return buf.getvalue(), "image/png"
 
 
+def _compare_with_png(candidate_data, candidate_label, img, colors, has_alpha):
+    """
+    Сравнивает candidate (JPEG/WebP) с PNG-N, возвращает меньший.
+    img должна быть в режиме RGB (непрозрачная) или RGBA (прозрачная).
+    Если PNG-N построить не удалось (нет libimagequant и т.п.) —
+    возвращает candidate без сравнения.
+    """
+    try:
+        if has_alpha:
+            cmp_img = img if img.mode == 'RGBA' else img.convert('RGBA')
+            method, _ = _get_quantize_method("LIBIMAGEQUANT", has_alpha=True)
+            png_data, png_type = _save_png8(cmp_img, colors=colors, method=method)
+        else:
+            cmp_img = img if img.mode == 'RGB' else img.convert('RGB')
+            png_data, png_type = _save_png8(cmp_img, colors=colors)
+    except Exception as e:
+        print(f"PNG-{colors} недоступен ({e}), оставляем {candidate_label}.")
+        return candidate_data, None
+    print(f"PNG-{colors}: {len(png_data)/1024:.1f} КБ")
+    if len(png_data) < len(candidate_data):
+        print(f"Выбран: PNG-{colors} ({len(png_data)/1024:.1f} КБ)")
+        return png_data, png_type
+    print(f"Выбран: {candidate_label} ({len(candidate_data)/1024:.1f} КБ)")
+    return candidate_data, None
+
+
 def compress_image(image_data, colors=None, quality=None):
     """
     Сжимает изображение: масштабирует, обрабатывает прозрачность,
-    конвертирует в JPEG или PNG с заданной палитрой.
+    конвертирует в JPEG или PNG с заданной палитрой (при --webp — только в WebP,
+    прозрачность сохраняется как есть).
 
     Если colors указан (число) — генерирует JPEG и PNG-N, выбирает меньший.
-    Если colors is None — только JPEG.
+    Если colors is None — только JPEG. В режиме --webp параметр -c/--colors не используется.
     """
     max_size = CFG["max_size"]
     min_size = CFG["min_size"]
     if quality is None:
         quality = CFG["quality"]
+    use_webp = CFG.get("webp", False)
 
     with Image.open(BytesIO(image_data)) as img:
         print(f"Исходный размер изображения: {img.size}")
@@ -173,6 +213,23 @@ def compress_image(image_data, colors=None, quality=None):
 
         final_width, final_height = img.size
         print(f"Финальный размер: {final_width}x{final_height}")
+
+        # --- Режим WebP (--webp): единый формат для всего ---
+        # WebP поддерживает альфа-канал нативно: прозрачность не заливается,
+        # цветность и монохромность не различаются — нужны только размер и качество.
+        if use_webp:
+            if has_alpha:
+                if img.mode != 'RGBA':
+                    img = img.convert('RGBA')
+                print("Обнаружена прозрачность. Сохраняем в WebP с альфа-каналом.")
+            else:
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+                print("Прозрачности нет.")
+
+            webp_data, webp_type = _save_webp(img, quality)
+            print(f"WebP q={quality}: {len(webp_data)/1024:.1f} КБ")
+            return webp_data, webp_type
 
         # --- Обработка прозрачности ---
         if has_alpha:
@@ -215,13 +272,9 @@ def compress_image(image_data, colors=None, quality=None):
 
         # Если указан colors: сравниваем JPEG vs PNG-N, выбираем меньший
         if colors is not None:
-            png_data, png_type = _save_png8(img, colors=colors)
-            print(f"PNG-{colors}: {len(png_data)/1024:.1f} КБ")
-            if len(png_data) < len(jpeg_data):
-                print(f"Выбран: PNG-{colors} ({len(png_data)/1024:.1f} КБ)")
-                return png_data, png_type
-            else:
-                print(f"Выбран: JPEG q={quality} ({len(jpeg_data)/1024:.1f} КБ)")
+            result = _compare_with_png(jpeg_data, f"JPEG q={quality}", img, colors, has_alpha=False)
+            if result[1] is not None:
+                return result
 
         return jpeg_data, jpeg_type
 
@@ -369,6 +422,12 @@ EXAMPLES = """\
   # Базовая обработка одного файла (результат — compress_<имя>.fb2)
   python compress_img_fb2.py book.fb2
 
+  # Все изображения — только в WebP (нужен Pillow с поддержкой WebP):
+  python compress_img_fb2.py book.fb2 --webp
+
+  # WebP с качеством 60:
+  python compress_img_fb2.py book.fb2 --webp -q 60
+
   # Серые линии/градиенты определяются как цветные (шум JPEG) —
   # поднимаем порог цветности:
   python compress_img_fb2.py book.fb2 --tolerance 15
@@ -393,6 +452,12 @@ EXAMPLES = """\
       -q 80 -c 256 --tolerance 12 --mono-quantize FASTOCTREE --mono-colors 256
 
 замечания:
+  --webp переводит ВСЕ изображения строго в WebP (никакого авто-выбора
+  против PNG): прозрачность сохраняется нативно (альфа-каналом, без
+  заливки фоном), если её нет — картинка конвертируется как есть.
+  Для WebP нужны только --max-size, --min-size и -q/--quality (качество).
+  Параметры -c/--colors, --mono-quantize, --mono-colors,
+  --tolerance и --sample-size в режиме --webp не используются.
   -c 0 отключает авто-выбор PNG (только JPEG) для цветных изображений.
   --mono-colors имеет смысл только если --mono-quantize не LA.
   Все параметры, не указанные в командной строке, берутся из CONFIG
@@ -409,25 +474,28 @@ def build_arg_parser():
     )
     p.add_argument("path", nargs="?", help="Путь до .fb2 файла или каталога")
     p.add_argument("-q", "--quality", type=int, default=None, metavar="N",
-                   help="качество JPEG 1-100 (по умолчанию: %(default)s из CONFIG)")
+                   help="качество JPEG/WebP 1-100 (по умолчанию: %(default)s из CONFIG)")
     p.add_argument("-c", "--colors", type=int, default=None, metavar="N",
-                   help="цветов для PNG авто-выбора 1-256, 0 = только JPEG (по умолчанию из CONFIG)")
+                   help="цветов для PNG авто-выбора 1-256, 0 = только JPEG (по умолчанию из CONFIG; в режиме --webp игнорируется)")
+    p.add_argument("--webp", action="store_true",
+                   help="сохранять все изображения строго в WebP (альфа-канал сохраняется;"
+                        " авто-выбор PNG отключается; по умолчанию выключено)")
     p.add_argument("--mono-quantize", choices=MONO_QUANTIZE_CHOICES, default=None,
                    metavar="M",
                    help="метод для монохромных с прозрачностью: LA, LIBIMAGEQUANT, "
-                        "FASTOCTREE, MEDIANCUT (по умолчанию из CONFIG)")
+                        "FASTOCTREE, MEDIANCUT (по умолчанию из CONFIG; в режиме --webp игнорируется)")
     p.add_argument("--mono-colors", type=int, default=None, metavar="N",
                    help="цветов при квантовании монохромных 2-256, "
-                        "значимо только если --mono-quantize не LA (по умолчанию из CONFIG)")
+                        "значимо только если --mono-quantize не LA (по умолчанию из CONFIG; в режиме --webp игнорируется)")
     p.add_argument("--max-size", type=int, default=None, metavar="N",
                    help="максимум по длинной стороне, px (по умолчанию из CONFIG)")
     p.add_argument("--min-size", type=int, default=None, metavar="N",
                    help="минимум по короткой стороне, px (по умолчанию из CONFIG)")
     p.add_argument("--tolerance", type=int, default=None, metavar="N",
                    help="порог определения цветности: разница R/G/B в тонах 0-255. "
-                        "Поднимите (12-20), если серая картинка считается цветной (по умолчанию из CONFIG)")
+                        "Поднимите (12-20), если серая картинка считается цветной (по умолчанию из CONFIG; в режиме --webp игнорируется)")
     p.add_argument("--sample-size", type=int, default=None, metavar="N",
-                   help="сколько пикселей проверять при определении цветности (по умолчанию из CONFIG)")
+                   help="сколько пикселей проверять при определении цветности (по умолчанию из CONFIG; в режиме --webp игнорируется)")
     return p
 
 
@@ -444,6 +512,8 @@ def apply_overrides(args):
             CFG["colors"] = args.colors
         else:
             print("Ошибка: -c / --colors должен быть от 1 до 256 (или 0 = выкл)"); sys.exit(1)
+    if args.webp:
+        CFG["webp"] = True
     if args.mono_quantize is not None:
         CFG["mono_quantize"] = args.mono_quantize
     if args.mono_colors is not None:
@@ -472,13 +542,24 @@ def print_effective_config():
     print("Эффективные настройки:")
     print(f"  max_size      = {CFG['max_size']} px")
     print(f"  min_size      = {CFG['min_size']} px")
-    print(f"  quality       = {CFG['quality']} (JPEG)")
-    print(f"  colors        = {CFG['colors']} (PNG авто-выбор, None = только JPEG)")
-    print(f"  mono_quantize = {CFG['mono_quantize']}")
-    print(f"  mono_colors   = {CFG['mono_colors']} (значимо, если mono_quantize != LA)")
-    print(f"  tolerance     = {CFG['tolerance']} (порог цветности)")
-    print(f"  sample_size   = {CFG['sample_size']} пикселей")
+    print(f"  quality       = {CFG['quality']} (JPEG/WebP)")
+    print(f"  colors        = {CFG['colors']} (PNG авто-выбор, None = только JPEG/WebP)")
+    print(f"  webp          = {'вкл (все изображения в WebP)' if CFG.get('webp') else 'выкл'}")
+    print(f"  mono_quantize = {CFG['mono_quantize']} (игнорируется при --webp)")
+    print(f"  mono_colors   = {CFG['mono_colors']} (значимо, если mono_quantize != LA; игнорируется при --webp)")
+    print(f"  tolerance     = {CFG['tolerance']} (порог цветности; игнорируется при --webp)")
+    print(f"  sample_size   = {CFG['sample_size']} пикселей (игнорируется при --webp)")
     print(f"  libimagequant = {'доступна' if _HAS_LIBIMAGEQUANT else 'НЕ найдена'}")
+
+
+def _print_mode(colors, quality):
+    if CFG.get("webp"):
+        mode = f"WebP q={quality} (только WebP, без авто-выбора PNG)"
+    else:
+        mode = f"JPEG q={quality}"
+        if colors is not None:
+            mode += f" vs PNG-{colors} (авто-выбор)"
+    print(f"Режим (цветные): {mode}")
 
 
 if __name__ == "__main__":
@@ -500,19 +581,13 @@ if __name__ == "__main__":
         print(f"Обработка одного файла: {path}")
         print(f"Результат будет сохранён в: {output_path}")
         print_effective_config()
-        mode = f"JPEG q={quality}"
-        if colors is not None:
-            mode += f" vs PNG-{colors} (авто-выбор)"
-        print(f"Режим (цветные): {mode}")
+        _print_mode(colors, quality)
         process_fb2(path, output_path=output_path, colors=colors, quality=quality)
 
     elif os.path.isdir(path):
         print(f"Рекурсивная обработка каталога с заменой оригиналов: {path}")
         print_effective_config()
-        mode = f"JPEG q={quality}"
-        if colors is not None:
-            mode += f" vs PNG-{colors} (авто-выбор)"
-        print(f"Режим (цветные): {mode}")
+        _print_mode(colors, quality)
         process_directory(path, colors=colors, quality=quality)
 
     else:
