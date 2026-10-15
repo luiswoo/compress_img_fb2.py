@@ -14,7 +14,7 @@ import random
 # max_size:      максимальный размер по длинной стороне (px)
 # min_size:      минимальный размер по короткой стороне (px)
 # quality:       качество JPEG/WebP (1-100)
-# colors:        цветов для PNG авто-выбора (1-256). None — только JPEG/WebP
+# colors:        цветов для PNG авто-выбора (1-256). None — только JPEG
 # mono_quantize: метод для монохромных с прозрачностью
 #                "LA"            — grayscale+alpha без потерь, макс. качество
 #                "LIBIMAGEQUANT" — лучшее квантование (если доступно в Pillow)
