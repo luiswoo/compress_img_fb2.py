@@ -54,7 +54,7 @@ python compress_img_fb2.py "/путь/до/каталога"
 
 ```bash
 # Обработать один файл настройками по умолчанию
-python compress_img_fb2.py book.fb2
+python compress_img_fb2.py "/путь/до/файла/файл.fb2"
 
 # Более сильное сжатие, 64 цвета для PNG
 python compress_img_fb2.py -q 60 -c 64 "/путь/до/файла/файл.fb2"
