@@ -14,7 +14,7 @@ import random
 # max_size:      максимальный размер по длинной стороне (px)
 # min_size:      минимальный размер по короткой стороне (px)
 # quality:       качество JPEG/WebP (1-100)
-# colors:        цветов для PNG авто-выбора (1-256). None — только JPEG
+# colors:        цветов для PNG авто-выбора (1-256). None — только JPEG/WebP
 # mono_quantize: метод для монохромных с прозрачностью
 #                "LA"            — grayscale+alpha без потерь, макс. качество
 #                "LIBIMAGEQUANT" — лучшее квантование (если доступно в Pillow)
@@ -39,6 +39,14 @@ CONFIG = {
     "tolerance": 15,      # 3 - строго чб, 15 градаций серого для грязного чб конвертиронного и другого формата
     "sample_size": 5000,
     "webp": False,        # True только при запуске с --webp
+    # skip:          правила пропуска изображений без обработки (задаются
+    #                только через --skip): "small" — слишком маленькие,
+    #                "png" — все PNG (кроме обложки), "png_mono_alpha" —
+    #                монохромные/малоцветные PNG с альфа-каналом (кроме обложки)
+    # small_percent: порог для small: площадь картинки меньше N%% площади
+    #                области max_size×min_size (задаётся как --skip small=N)
+    "skip": [],
+    "small_percent": 10,
 }
 # ================================================================
 
@@ -111,6 +119,43 @@ def is_color_image(img, tolerance=None, sample_size=None):
     return False
 
 
+def _check_skip(img, image_id):
+    """
+    Проверяет правила --skip. Возвращает причину пропуска (строку) или None.
+    Пропущенные изображения остаются в исходном формате и размере.
+    Действует во всех режимах, включая --webp.
+    """
+    rules = CFG.get("skip") or []
+    if not rules:
+        return None
+
+    src_format = (getattr(img, "format", None) or "").lower()
+    is_cover = os.path.basename(image_id or "").lower().startswith("cover")
+
+    # 1) Слишком маленькие изображения — независимо от формата
+    #    (вензели, буквицы, клинопись в строке)
+    if "small" in rules:
+        w, h = img.size
+        limit_area = CFG["max_size"] * CFG["min_size"]
+        area_percent = (w * h) / limit_area * 100 if limit_area > 0 else 100.0
+        threshold = CFG.get("small_percent", 10)
+        if area_percent < threshold:
+            return (f"маленькая площадь ({w}x{h} = {area_percent:.1f}% от "
+                    f"{CFG['max_size']}x{CFG['min_size']}, порог {threshold}%)")
+
+    if src_format == "png" and not is_cover:
+        # 2) Все PNG (скриншоты, графики, таблицы теряют читаемость при JPEG)
+        if "png" in rules:
+            return "PNG (правило skip png; обложки не трогаем)"
+        # 3) Только монохромные/малоцветные PNG с альфа-каналом
+        if "png_mono_alpha" in rules:
+            has_alpha = (img.mode in ('RGBA', 'LA')
+                         or (img.mode == 'P' and 'transparency' in img.info))
+            if has_alpha and not is_color_image(img):
+                return "монохромный PNG с альфа-каналом (правило skip png_mono_alpha)"
+    return None
+
+
 def _save_jpeg(img, quality):
     """Сохраняет изображение в JPEG с заданным качеством."""
     buf = BytesIO()
@@ -171,7 +216,7 @@ def _compare_with_png(candidate_data, candidate_label, img, colors, has_alpha):
     return candidate_data, None
 
 
-def compress_image(image_data, colors=None, quality=None):
+def compress_image(image_data, colors=None, quality=None, image_id=None):
     """
     Сжимает изображение: масштабирует, обрабатывает прозрачность,
     конвертирует в JPEG или PNG с заданной палитрой (при --webp — только в WebP,
@@ -179,6 +224,9 @@ def compress_image(image_data, colors=None, quality=None):
 
     Если colors указан (число) — генерирует JPEG и PNG-N, выбирает меньший.
     Если colors is None — только JPEG. В режиме --webp параметр -c/--colors не используется.
+
+    Правила --skip проверяются до масштабирования: пропущенное изображение
+    возвращает (None, None) и остаётся в исходном виде.
     """
     max_size = CFG["max_size"]
     min_size = CFG["min_size"]
@@ -188,6 +236,12 @@ def compress_image(image_data, colors=None, quality=None):
 
     with Image.open(BytesIO(image_data)) as img:
         print(f"Исходный размер изображения: {img.size}")
+
+        # --- Правила пропуска (--skip) ---
+        skip_reason = _check_skip(img, image_id)
+        if skip_reason:
+            print(f"Пропуск по правилу: {skip_reason}")
+            return None, None
 
         # Определяем наличие альфа-канала
         has_alpha = img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info)
@@ -338,9 +392,14 @@ def process_fb2(file_path, output_path=None, colors=None, quality=None):
             total_orig += orig_size
 
             try:
-                compressed_data, new_type = compress_image(image_data, colors=colors, quality=quality)
+                compressed_data, new_type = compress_image(
+                    image_data, colors=colors, quality=quality, image_id=image_id)
             except Exception as e:
                 print(f"Ошибка сжатия: {e}")
+                continue
+
+            if compressed_data is None:
+                print("Оставлено без изменений")
                 continue
 
             new_size = len(compressed_data)
@@ -428,6 +487,20 @@ EXAMPLES = """\
   # WebP с качеством 60:
   python compress_img_fb2.py book.fb2 --webp -q 60
 
+  # Не сжимать мелкие картинки (вензели, буквицы) — меньше 10% площади
+  # области max_size×min_size (800x600 = 480000 px² → порог 48000 px²):
+  python compress_img_fb2.py book.fb2 --skip small
+
+  # То же, но порог 5% (можно и так: --skip small:5):
+  python compress_img_fb2.py book.fb2 --skip small=5
+
+  # PNG не трогать вообще (скриншоты, таблицы, графики), кроме обложки:
+  python compress_img_fb2.py book.fb2 --skip png
+
+  # Только монохромные PNG с прозрачностью (в JPEG теряют читаемость):
+  python compress_img_fb2.py book.fb2 --skip png_mono_alpha
+
+
   # Серые линии/градиенты определяются как цветные (шум JPEG) —
   # поднимаем порог цветности:
   python compress_img_fb2.py book.fb2 --tolerance 15
@@ -458,6 +531,12 @@ EXAMPLES = """\
   Для WebP нужны только --max-size, --min-size и -q/--quality (качество).
   Параметры -c/--colors, --mono-quantize, --mono-colors,
   --tolerance и --sample-size в режиме --webp не используются.
+  --skip принимает одно правило за раз (small[=N], png или
+  png_mono_alpha; разделитель значения — "=" или ":"). Правило
+  действует во всех режимах: пропущенное изображение остаётся
+  в исходном формате и размере. Правило small сравнивает площадь
+  картинки с площадью области max_size×min_size. Обложки (id,
+  начинающееся с "cover") из правил png и png_mono_alpha исключены.
   -c 0 отключает авто-выбор PNG (только JPEG) для цветных изображений.
   --mono-colors имеет смысл только если --mono-quantize не LA.
   Все параметры, не указанные в командной строке, берутся из CONFIG
@@ -480,6 +559,13 @@ def build_arg_parser():
     p.add_argument("--webp", action="store_true",
                    help="сохранять все изображения строго в WebP (альфа-канал сохраняется;"
                         " авто-выбор PNG отключается; по умолчанию выключено)")
+    p.add_argument("--skip", default=None, metavar="RULE",
+                   help="правило пропуска изображений без обработки (в любом режиме, "
+                        "включая --webp): small[=N] — не трогать картинки, площадь которых "
+                        "меньше N%% площади области max_size×min_size (по умолчанию N=10; "
+                        "допускается small=10 или small:10); png — все PNG, кроме обложки "
+                        "(cover.*); png_mono_alpha — монохромные/малоцветные PNG с "
+                        "альфа-каналом, кроме обложки")
     p.add_argument("--mono-quantize", choices=MONO_QUANTIZE_CHOICES, default=None,
                    metavar="M",
                    help="метод для монохромных с прозрачностью: LA, LIBIMAGEQUANT, "
@@ -499,6 +585,40 @@ def build_arg_parser():
     return p
 
 
+def _parse_skip_rule(rule_str):
+    """
+    Разбирает одно правило --skip в (имя правила, процент для small или None).
+    Формы записи: small, small=10, small:10, png, png_mono_alpha
+    (допустим и синоним png_monochrome_alpha).
+    """
+    name, attached = rule_str, ""
+    for sep in ("=", ":"):
+        if sep in rule_str:
+            name, _, attached = rule_str.partition(sep)
+            break
+    if name == "png_monochrome_alpha":
+        name = "png_mono_alpha"
+    if name not in ("small", "png", "png_mono_alpha"):
+        print(f"Ошибка: неизвестное правило --skip: '{rule_str}'. "
+              "Допустимые: small[=N], png, png_mono_alpha")
+        sys.exit(1)
+    percent = None
+    if name == "small":
+        if not attached and ("=" in rule_str or ":" in rule_str):
+            print(f"Ошибка: после '{rule_str}' нужно число процентов")
+            sys.exit(1)
+        if attached:
+            try:
+                percent = float(attached)
+            except ValueError:
+                print(f"Ошибка: '{attached}' не число")
+                sys.exit(1)
+            if not (0 < percent <= 100):
+                print("Ошибка: процент для small должен быть в (0, 100]")
+                sys.exit(1)
+    return name, percent
+
+
 def apply_overrides(args):
     """Накладывает значения из командной строки на CONFIG."""
     if args.quality is not None:
@@ -514,6 +634,11 @@ def apply_overrides(args):
             print("Ошибка: -c / --colors должен быть от 1 до 256 (или 0 = выкл)"); sys.exit(1)
     if args.webp:
         CFG["webp"] = True
+    if args.skip is not None:
+        rule, percent = _parse_skip_rule(args.skip)
+        CFG["skip"] = [rule]
+        if percent is not None:
+            CFG["small_percent"] = percent
     if args.mono_quantize is not None:
         CFG["mono_quantize"] = args.mono_quantize
     if args.mono_colors is not None:
@@ -545,6 +670,11 @@ def print_effective_config():
     print(f"  quality       = {CFG['quality']} (JPEG/WebP)")
     print(f"  colors        = {CFG['colors']} (PNG авто-выбор, None = только JPEG/WebP)")
     print(f"  webp          = {'вкл (все изображения в WebP)' if CFG.get('webp') else 'выкл'}")
+    _skip_rules = CFG.get("skip") or []
+    _skip_str = ", ".join(_skip_rules) if _skip_rules else "нет"
+    if "small" in _skip_rules:
+        _skip_str += f" (порог {CFG.get('small_percent', 10)}% площади {CFG['max_size']}x{CFG['min_size']})"
+    print(f"  skip          = {_skip_str}")
     print(f"  mono_quantize = {CFG['mono_quantize']} (игнорируется при --webp)")
     print(f"  mono_colors   = {CFG['mono_colors']} (значимо, если mono_quantize != LA; игнорируется при --webp)")
     print(f"  tolerance     = {CFG['tolerance']} (порог цветности; игнорируется при --webp)")
