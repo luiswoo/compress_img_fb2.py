@@ -739,6 +739,26 @@ if __name__ == "__main__":
     colors = CFG["colors"]
     quality = CFG["quality"]
 
+    # Специальный случай: один слеш "/" → текущий каталог с подтверждением
+    if path == "/":
+        cwd = os.getcwd()
+        print(f"Вы указали «/». Это будет обработано как текущий каталог:")
+        print(f"  {cwd}")
+        print("ВНИМАНИЕ: все .fb2-файлы будут обработаны РЕКУРСИВНО с ЗАМЕНОЙ оригиналов!")
+        answer = input("Продолжить? [y/N]: ").strip().lower()
+        if answer not in ("y", "yes", "д", "да"):
+            print("Отменено.")
+            sys.exit(0)
+        path = cwd
+
+    # Если передан просто имя файла (без каталога) — ищем его в текущем каталоге
+    if not os.path.dirname(path) and not os.path.isabs(path):
+        # Относительное имя без пути → ищем в cwd
+        candidate = os.path.join(os.getcwd(), path)
+        if os.path.isfile(candidate):
+            path = candidate
+        # если не нашли — оставим как есть, ниже сработает проверка
+
     if os.path.isfile(path) and path.lower().endswith(".fb2"):
         directory, filename = os.path.split(path)
         output_path = os.path.join(directory, f"compress_{filename}")
@@ -756,4 +776,7 @@ if __name__ == "__main__":
 
     else:
         print(f"Ошибка: '{path}' не является .fb2 файлом или каталогом.")
+        # Подсказка, если искали относительное имя
+        if not os.path.dirname(args.path) and not os.path.isabs(args.path):
+            print(f"(искали в текущем каталоге: {os.getcwd()})")
         sys.exit(1)
